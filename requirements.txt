@@ -1,0 +1,2 @@
+# TraeCacheCleaner 依赖
+PyQt5>=5.15.0
