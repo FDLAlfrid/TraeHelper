@@ -9,9 +9,12 @@ import sys
 import json
 import shutil
 import time
+import ctypes
 from pathlib import Path
 from datetime import datetime
 from urllib.parse import unquote, urlparse
+
+VERSION = "q_v0.1.3"
 
 # 检查 PyQt5 是否可用
 try:
@@ -528,6 +531,9 @@ class MainWindow(QMainWindow):
         # 加载配置（必须在UI创建之后）
         self.load_app_config()
         
+        # 控制台窗口控制
+        self._apply_console_visibility(show_init=True)
+        
         # 更新防呆模式复选框状态
         self.safe_mode_check.setChecked(self.safe_mode)
         
@@ -536,7 +542,8 @@ class MainWindow(QMainWindow):
     
     def load_app_config(self):
         """加载应用配置"""
-        self.safe_mode = True  # 默认启用防呆模式
+        self.safe_mode = True
+        self.show_console = True
         
         if os.path.exists(self.config_path):
             try:
@@ -544,6 +551,8 @@ class MainWindow(QMainWindow):
                     config = json.load(f)
                     if 'safe_mode' in config:
                         self.safe_mode = config['safe_mode']
+                    if 'show_console' in config:
+                        self.show_console = config['show_console']
             except Exception as e:
                 print(f"Error loading config: {e}")
     
@@ -551,12 +560,45 @@ class MainWindow(QMainWindow):
         """保存应用配置"""
         try:
             config = {
-                'safe_mode': self.safe_mode
+                'safe_mode': self.safe_mode,
+                'show_console': self.show_console
             }
             with open(self.config_path, 'w', encoding='utf-8') as f:
                 json.dump(config, f, indent=2)
         except Exception as e:
             print(f"Error saving config: {e}")
+    
+    def _apply_console_visibility(self, show_init=False):
+        """应用控制台可见性设置"""
+        try:
+            kernel32 = ctypes.windll.kernel32
+            console = kernel32.GetConsoleWindow()
+            if console:
+                if self.show_console:
+                    kernel32.ShowWindow(console, 5)  # SW_SHOW
+                    if show_init:
+                        self._print_console_tips()
+                else:
+                    kernel32.ShowWindow(console, 0)  # SW_HIDE
+        except:
+            pass
+    
+    def _print_console_tips(self):
+        """打印控制台启动提示"""
+        sep = "=" * 50
+        print(f"\n{sep}")
+        print(f"  TraeCacheCleaner v{VERSION}")
+        print(f"{sep}")
+        print(f"  GUI 模式已启动")
+        print(f"  提示: 此控制台窗口可在「设置」中关闭")
+        print(f"  CLI 模式: 添加 --cli 参数运行")
+        print(f"{sep}\n")
+    
+    def toggle_console(self, state):
+        """切换控制台显示状态"""
+        self.show_console = (state == Qt.Checked)
+        self.save_app_config()
+        self._apply_console_visibility()
     
     def setup_theme(self):
         """设置主题样式"""
@@ -885,11 +927,12 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(self.settings_tab)
         
         # 设置列表
+        group1 = QGroupBox("配置导出/导入")
+        g1_layout = QVBoxLayout(group1)
         self.settings_list = QListWidget()
         self.settings_list.setSelectionMode(QAbstractItemView.NoSelection)
-        layout.addWidget(self.settings_list)
+        g1_layout.addWidget(self.settings_list)
         
-        # 按钮栏
         btn_layout = QHBoxLayout()
         self.export_btn = QPushButton("导出设置")
         self.export_btn.clicked.connect(self.export_settings)
@@ -898,9 +941,39 @@ class MainWindow(QMainWindow):
         self.import_btn = QPushButton("导入设置")
         self.import_btn.clicked.connect(self.import_settings)
         btn_layout.addWidget(self.import_btn)
-        
         btn_layout.addStretch()
-        layout.addLayout(btn_layout)
+        g1_layout.addLayout(btn_layout)
+        layout.addWidget(group1)
+        
+        # 程序选项
+        group2 = QGroupBox("程序选项")
+        g2_layout = QVBoxLayout(group2)
+        
+        self.console_check = QCheckBox("启动时显示控制台窗口（默认开启）")
+        self.console_check.setChecked(self.show_console)
+        self.console_check.setToolTip("关闭后下次启动将隐藏控制台黑窗口")
+        self.console_check.stateChanged.connect(self.toggle_console)
+        g2_layout.addWidget(self.console_check)
+        
+        layout.addWidget(group2)
+        
+        # 关于
+        group3 = QGroupBox("关于")
+        g3_layout = QVBoxLayout(group3)
+        about_text = QLabel(
+            f"<b>TraeCacheCleaner</b> v{VERSION}<br><br>"
+            "Trae IDE 缓存清理工具<br>"
+            "支持 GUI / CLI 双模式<br><br>"
+            "功能: 缓存清理 / 对话管理 / 工作区管理<br>"
+            "扩展扫描 / MCP 配置 / 设置导出导入<br><br>"
+            "<a href='https://github.com/FDAlfrid/TraeCacheCleaner'>GitHub</a>"
+        )
+        about_text.setOpenExternalLinks(True)
+        about_text.setWordWrap(True)
+        g3_layout.addWidget(about_text)
+        layout.addWidget(group3)
+        
+        layout.addStretch()
     
     def start_scans(self):
         """启动后台扫描"""
@@ -1037,8 +1110,7 @@ class MainWindow(QMainWindow):
             layout.setSpacing(6)
             
             checkbox = QCheckBox()
-            checkbox.setChecked(False)
-            item['checked'] = False
+            checkbox.setChecked(item.get('checked', False))
             checkbox.stateChanged.connect(lambda state, it=item: self.update_item_checked(it, state))
             layout.addWidget(checkbox)
             
