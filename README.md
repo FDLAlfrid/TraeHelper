@@ -25,32 +25,35 @@ Trae IDE 缓存清理工具，支持 **图形界面（GUI）** 和 **命令行�
 
 ## 运行方式
 
-——仅限基于.py运行有一点小限制，直接使用exe版则可随意。
+程序以 **GUI 为默认模式**，无论哪种启动方式都会优先打开图形界面。
+只有当当前环境和系统中都找不到 PyQt5 时，才会降级为命令行模式。
 
-### 方式一：双击运行（Windows GUI，推荐）
+### 方式一：双击 EXE（推荐）
 
-直接双击 `run.bat`，脚本会自动启动程序。
+`TraeCacheCleaner.exe` — 已内置 PyQt5，**任何 Windows 电脑即开即用 GUI**。
 
-### 方式二：手动运行（自动检测）
+### 方式二：双击 run.bat
+
+```bash
+run.bat
+```
+自动调用当前环境的 Python，按策略优先启动 GUI。
+
+### 方式三：直接运行 Python 脚本
 
 ```bash
 python trae_cache_cleaner.py
 ```
+程序会自动检测当前 Python 环境：
+- 有 PyQt5 → 直接启动 GUI
+- 无 PyQt5 → 自动搜索系统中安装了 PyQt5 的 Python（如 conda base 环境），找到后自动以 GUI 模式启动
+- 全系统都找不到 PyQt5 → 降级为 CLI 模式
 
-### 方式三：强制使用命令行模式
-
-```bash
-python trae_cache_cleaner.py --cli
-# 或
-python trae_cache_cleaner.py -c
-```
-
-### 方式四：强制使用 GUI 模式
+### 强制指定模式
 
 ```bash
-python trae_cache_cleaner.py --gui
-# 或
-python trae_cache_cleaner.py -g
+python trae_cache_cleaner.py --cli     # 强制命令行
+python trae_cache_cleaner.py --gui     # 强制 GUI（无 PyQt5 时报错退出）
 ```
 
 ## 环境要求
@@ -58,11 +61,19 @@ python trae_cache_cleaner.py -g
 - **Python 3.8+** （单.py文件运行必选）
 - **PyQt5 5.15+** （可选，用于 GUI 模式）
 
-## 智能自动检测
+## 启动策略
 
-程序会自动检测环境：
-- ✅ 有 PyQt5 → 启动图形界面
-- ❌ 无 PyQt5 → 自动切换到命令行模式
+程序以 **GUI 优先** 为原则自动选择模式：
+
+```
+当前 Python 有 PyQt5？
+  ├─ 是 → 启动 GUI
+  └─ 否 → 系统中有其他 Python 装了 PyQt5？
+            ├─ 是 → 自动调用该 Python 启动 GUI
+            └─ 否 → 降级为 CLI 模式
+```
+
+CLI 模式仅在系统全局都找不到 PyQt5 时才会触发，日常使用无需关心依赖问题。
 
 ## 安装依赖
 
@@ -348,7 +359,7 @@ TraeCacheCleaner-PyQt/
 ├── build.bat                  # PyInstaller 打包脚本
 ├── requirements.txt           # 依赖声明
 ├── output/                    # 打包输出目录
-│   └── TraeCacheCleaner.exe   # 独立可执行文件（38MB）
+│   └── TraeCacheCleaner.exe   # 独立可执行文件（~37MB）
 └── README.md                  # 说明文档
 ```
 
@@ -389,10 +400,16 @@ TraeCacheCleaner-PyQt/
 
 A: 程序会自动检测标准路径。如果位置不同，可能需要手动修改代码中的路径配置。
 
-### Q: 可以在 Linux/macOS 上使用吗？
+### Q: 可以用在 Linux/macOS 上吗？
 
 A: 目前主要针对 Windows 优化，但核心功能可能在其他平台上也能工作，需要修改路径检测逻辑。
 
+### Q: 运行 `python trae_cache_cleaner.py` 进不了 GUI？
+
+A: 这种情况基本不会发生。程序会自动搜索系统中所有安装了 PyQt5 的 Python 解释器（如 conda base 环境），找到后自动调用它启动 GUI。仅当全系统都找不到 PyQt5 时才降级 CLI。
+
+   如果确实进了 CLI，最简单的办法是直接双击 `output\TraeCacheCleaner.exe`（已内置 PyQt5）。
+
 ### Q: 程序运行报错说找不到 PyQt5 怎么办？
 
-A: 请确保已安装 PyQt5：`pip install PyQt5`
+A: 直接用打包好的 `output\TraeCacheCleaner.exe` 即可，已包含 PyQt5。如需从源码运行，请安装 PyQt5：`pip install PyQt5`。
