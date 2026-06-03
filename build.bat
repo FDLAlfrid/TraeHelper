@@ -16,9 +16,9 @@ REM Clean old files
 if exist "output" rmdir /s /q output
 
 if exist "TraeCacheCleaner.ico" (
-    "%BUILD_PYTHON%" -m PyInstaller --onefile --console --name "TraeCacheCleaner" --icon "TraeCacheCleaner.ico" --add-data "TraeCacheCleaner.ico;." --distpath "output" --workpath "build_tmp" "trae_cache_cleaner.py"
+    "%BUILD_PYTHON%" -m PyInstaller --onefile --console --name "TraeCacheCleaner" --icon "TraeCacheCleaner.ico" --add-data "TraeCacheCleaner.ico;." --distpath "output" --workpath "build_tmp" --noconfirm "trae_cache_cleaner.py"
 ) else (
-    "%BUILD_PYTHON%" -m PyInstaller --onefile --console --name "TraeCacheCleaner" --distpath "output" --workpath "build_tmp" "trae_cache_cleaner.py"
+    "%BUILD_PYTHON%" -m PyInstaller --onefile --console --name "TraeCacheCleaner" --distpath "output" --workpath "build_tmp" --noconfirm "trae_cache_cleaner.py"
 )
 
 if %errorlevel% neq 0 (
