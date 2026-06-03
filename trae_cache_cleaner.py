@@ -9,18 +9,6 @@ import sys
 import json
 import ctypes
 
-# ========== 立即处理控制台窗口（必须在其他代码执行前）==========
-# GUI模式下默认将控制台最小化到任务栏（不影响CLI模式）
-# 命令行参数 --cli 会强制使用CLI模式，此时控制台保持显示
-if '--cli' not in sys.argv:
-    try:
-        kernel32 = ctypes.windll.kernel32
-        console = kernel32.GetConsoleWindow()
-        if console:
-            kernel32.ShowWindow(console, 6)  # SW_MINIMIZE (最小化到任务栏)
-    except:
-        pass
-
 # ========== 继续导入其他模块 ==========
 import shutil
 import time
@@ -37,7 +25,7 @@ try:
         QListWidget, QListWidgetItem, QCheckBox, QLabel, QPushButton,
         QProgressBar, QMessageBox, QFileDialog, QGroupBox, QHeaderView,
         QTableWidget, QTableWidgetItem, QAbstractItemView, QLineEdit, QSpacerItem,
-        QSizePolicy, QTreeWidget, QTreeWidgetItem
+        QSizePolicy, QTreeWidget, QTreeWidgetItem, QDialog
     )
     from PyQt5.QtCore import (
         Qt, QThread, pyqtSignal, QSize, QFileInfo, QDir
@@ -222,6 +210,68 @@ def is_dark_mode():
         return value == 0
     except Exception:
         return False
+
+def analyze_directory(path, max_depth=3, min_size_bytes=1024*1024):
+    """
+    分析目录结构，找出占用空间大的文件和子目录
+    
+    Args:
+        path: 要分析的目录路径
+        max_depth: 最大递归深度
+        min_size_bytes: 最小文件大小阈值（默认1MB）
+    
+    Returns:
+        包含文件和目录信息的列表，按大小降序排列
+    """
+    results = []
+    
+    def scan(current_path, depth):
+        if depth > max_depth:
+            return
+        
+        try:
+            entries = os.listdir(current_path)
+        except (PermissionError, OSError):
+            return
+        
+        for entry in entries:
+            full_path = os.path.join(current_path, entry)
+            
+            try:
+                if os.path.isfile(full_path):
+                    size = os.path.getsize(full_path)
+                    if size >= min_size_bytes:
+                        relative_path = os.path.relpath(full_path, path)
+                        results.append({
+                            'type': 'file',
+                            'name': entry,
+                            'path': full_path,
+                            'relative_path': relative_path,
+                            'size': size,
+                            'depth': depth
+                        })
+                elif os.path.isdir(full_path):
+                    size = scan_dir_size(full_path)
+                    if size >= min_size_bytes:
+                        relative_path = os.path.relpath(full_path, path)
+                        results.append({
+                            'type': 'directory',
+                            'name': entry,
+                            'path': full_path,
+                            'relative_path': relative_path,
+                            'size': size,
+                            'depth': depth
+                        })
+                        scan(full_path, depth + 1)
+            except (PermissionError, OSError):
+                continue
+    
+    scan(path, 1)
+    
+    # 按大小降序排列
+    results.sort(key=lambda x: x['size'], reverse=True)
+    
+    return results
 
 if HAS_PYQT5:
     # 扫描线程
@@ -510,8 +560,12 @@ if HAS_PYQT5:
             self.app_dir = PathConfig.get_app_dir()
             print(f"[DEBUG] 应用目录: {self.app_dir}")
         
-            # 设置窗口图标
-            icon_path = os.path.join(self.app_dir, 'TraeCacheCleaner.ico')
+            # 设置窗口图标（打包后图标在 sys._MEIPASS 临时目录中）
+            if getattr(sys, 'frozen', False):
+                meipass = getattr(sys, '_MEIPASS', '')
+                icon_path = os.path.join(meipass, 'TraeCacheCleaner.ico') if meipass else ''
+            else:
+                icon_path = os.path.join(self.app_dir, 'TraeCacheCleaner.ico')
             print(f"[DEBUG] 图标路径: {icon_path} (存在: {os.path.exists(icon_path)})")
             if os.path.exists(icon_path):
                 self.setWindowIcon(QIcon(icon_path))
@@ -547,7 +601,9 @@ if HAS_PYQT5:
         
             # 配置文件路径（用户目录下的隐藏文件夹）
             self.config_path = os.path.join(PathConfig.get_config_dir(), 'app_config.json')
+            self.scan_cache_path = os.path.join(PathConfig.get_config_dir(), 'scan_cache.json')
             print(f"[DEBUG] 配置文件路径: {self.config_path}")
+            print(f"[DEBUG] 扫描缓存路径: {self.scan_cache_path}")
         
             # 先加载配置（必须在UI创建之前）
             self.load_app_config()
@@ -563,7 +619,10 @@ if HAS_PYQT5:
     
         def load_app_config(self):
             """加载应用配置"""
+            # 默认配置
             self.safe_mode = True
+            self.last_scan_time = 0
+            self.cache_ttl = 3600  # 扫描缓存有效期（秒）
         
             if os.path.exists(self.config_path):
                 try:
@@ -571,14 +630,20 @@ if HAS_PYQT5:
                         config = json.load(f)
                         if 'safe_mode' in config:
                             self.safe_mode = config['safe_mode']
+                        if 'last_scan_time' in config:
+                            self.last_scan_time = config['last_scan_time']
+                        if 'cache_ttl' in config:
+                            self.cache_ttl = config['cache_ttl']
                 except Exception as e:
                     print(f"Error loading config: {e}")
-    
+
         def save_app_config(self):
             """保存应用配置"""
             try:
                 config = {
-                    'safe_mode': self.safe_mode
+                    'safe_mode': self.safe_mode,
+                    'last_scan_time': self.last_scan_time,
+                    'cache_ttl': self.cache_ttl
                 }
                 with open(self.config_path, 'w', encoding='utf-8') as f:
                     json.dump(config, f, indent=2)
@@ -711,7 +776,7 @@ if HAS_PYQT5:
             self.tab_widget.addTab(self.settings_tab, "设置")
         
             layout.addWidget(self.tab_widget)
-        
+
             # 状态栏
             self.status_bar = self.statusBar()
             self.status_bar.showMessage("就绪")
@@ -753,6 +818,7 @@ if HAS_PYQT5:
             # 列表
             self.cache_list = QListWidget()
             self.cache_list.setSelectionMode(QAbstractItemView.NoSelection)
+            self.cache_list.doubleClicked.connect(self.on_cache_double_clicked)
             layout.addWidget(self.cache_list)
         
             # 按钮栏
@@ -894,7 +960,13 @@ if HAS_PYQT5:
             self.mcp_table = QTableWidget()
             self.mcp_table.setColumnCount(4)
             self.mcp_table.setHorizontalHeaderLabels(["启用", "名称", "描述", "路径/命令"])
-            self.mcp_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+            self.mcp_table.setAlternatingRowColors(True)
+            # "启用"列固定窄宽，路径列可拉伸
+            self.mcp_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+            self.mcp_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+            self.mcp_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
+            self.mcp_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Stretch)
+            self.mcp_table.doubleClicked.connect(self.on_mcp_table_double_clicked)
             layout.addWidget(self.mcp_table)
         
             # 按钮栏
@@ -919,6 +991,8 @@ if HAS_PYQT5:
             g1_layout = QVBoxLayout(group1)
             self.settings_list = QListWidget()
             self.settings_list.setSelectionMode(QAbstractItemView.NoSelection)
+            self.settings_list.setMinimumHeight(250)
+            self.settings_list.itemDoubleClicked.connect(self.on_settings_double_clicked)
             g1_layout.addWidget(self.settings_list)
         
             btn_layout = QHBoxLayout()
@@ -929,6 +1003,13 @@ if HAS_PYQT5:
             self.import_btn = QPushButton("导入设置")
             self.import_btn.clicked.connect(self.import_settings)
             btn_layout.addWidget(self.import_btn)
+        
+            # 文件分析按钮
+            self.analyze_btn = QPushButton("分析全局存储")
+            self.analyze_btn.clicked.connect(self.analyze_global_storage)
+            self.analyze_btn.setToolTip("分析全局存储目录，找出占用空间大的文件")
+            btn_layout.addWidget(self.analyze_btn)
+        
             btn_layout.addStretch()
             g1_layout.addLayout(btn_layout)
             layout.addWidget(group1)
@@ -944,7 +1025,9 @@ if HAS_PYQT5:
                 "<b>悬停提示</b><br>"
                 "将鼠标悬停在项目上可查看详细信息，包括路径、大小、安全级别等。<br><br>"
                 "<b>双击跳转</b><br>"
-                "在扩展列表、对话记录、工作区列表中双击项目可直接打开对应文件夹。"
+                "所有列表项均支持双击打开对应文件夹：<br>"
+                " - 缓存列表、对话记录、工作区列表<br>"
+                " - 扩展表格、配置导出/导入项"
             )
             hint_label.setStyleSheet("color: #888; font-size: 20px;")
             hint_label.setWordWrap(True)
@@ -962,7 +1045,7 @@ if HAS_PYQT5:
                 "支持 GUI / CLI 双模式<br><br>"
                 "功能: 缓存清理 / 对话管理 / 工作区管理<br>"
                 "扩展扫描 / MCP 配置 / 设置导出导入<br><br>"
-                "<a href='https://github.com/FDAlfrid/TraeCacheCleaner'>GitHub</a>"
+                "<a href='https://github.com/FDLAlfrid/TraeHelper'>GitHub</a>"
             )
             about_text.setOpenExternalLinks(True)
             about_text.setWordWrap(True)
@@ -972,7 +1055,12 @@ if HAS_PYQT5:
             layout.addStretch()
     
         def start_scans(self):
-            """启动后台扫描"""
+            """启动后台扫描（支持缓存加速）"""
+            # 尝试加载扫描缓存
+            if self.load_scan_cache():
+                print("[DEBUG] 使用扫描缓存加速启动")
+                return
+            
             # 扫描缓存
             self.cache_scan_thread = ScanThread('cache')
             self.cache_scan_thread.scan_done.connect(self.on_cache_scan_done)
@@ -998,27 +1086,153 @@ if HAS_PYQT5:
         
             # 加载设置项
             self.load_settings_items()
+
+        def load_scan_cache(self):
+            """加载扫描缓存（加速启动）"""
+            now = time.time()
+            
+            # 检查缓存文件是否存在且未过期
+            if not os.path.exists(self.scan_cache_path):
+                return False
+            
+            # 检查缓存是否过期
+            if now - self.last_scan_time > self.cache_ttl:
+                print(f"[DEBUG] 扫描缓存已过期（{now - self.last_scan_time}秒前）")
+                return False
+            
+            try:
+                with open(self.scan_cache_path, 'r', encoding='utf-8') as f:
+                    cache = json.load(f)
+                
+                # 验证缓存数据完整性
+                if 'cache_items' in cache and 'chat_items' in cache and \
+                   'workspace_items' in cache and 'extension_items' in cache:
+                    self.cache_items = cache['cache_items']
+                    self.chat_items = cache['chat_items']
+                    self.workspace_items = cache['workspace_items']
+                    self.extension_items = cache['extension_items']
+                    
+                    # 更新UI
+                    self.update_cache_list()
+                    self.sort_chat('time')
+                    self.update_workspace_list()
+                    self.update_extension_table()
+                    
+                    # 加载设置项和MCP配置（这些不缓存）
+                    self.load_mcp_config()
+                    self.load_settings_items()
+                    return True
+            except Exception as e:
+                print(f"[DEBUG] 加载扫描缓存失败: {e}")
+            
+            return False
+
+        def save_scan_cache(self):
+            """保存扫描缓存"""
+            try:
+                cache = {
+                    'cache_items': self.cache_items,
+                    'chat_items': self.chat_items,
+                    'workspace_items': self.workspace_items,
+                    'extension_items': self.extension_items,
+                    'timestamp': time.time()
+                }
+                with open(self.scan_cache_path, 'w', encoding='utf-8') as f:
+                    json.dump(cache, f, indent=2)
+                
+                # 更新最后扫描时间
+                self.last_scan_time = time.time()
+                self.save_app_config()
+                print("[DEBUG] 扫描缓存已保存")
+            except Exception as e:
+                print(f"[DEBUG] 保存扫描缓存失败: {e}")
     
         def on_cache_scan_done(self, items):
             """缓存扫描完成"""
             self.cache_items = items
             self.update_cache_list()
-    
+            self._check_scan_complete()
+
         def on_chat_scan_done(self, items):
             """对话扫描完成"""
             self.chat_items = items
             self.sort_chat('time')
-    
+            self._check_scan_complete()
+
         def on_workspace_scan_done(self, items):
             """工作区扫描完成"""
             self.workspace_items = items
             self.update_workspace_list()
-    
+            self._check_scan_complete()
+
         def on_extension_scan_done(self, items):
             """扩展扫描完成"""
             self.extension_items = items
             self.update_extension_table()
-    
+            self._check_scan_complete()
+
+        def _check_scan_complete(self):
+            """检查所有扫描是否完成，完成后保存缓存"""
+            # 检查所有数据是否已加载
+            if self.cache_items and self.chat_items and self.workspace_items and self.extension_items:
+                self.save_scan_cache()
+
+        def schedule_refresh(self):
+            """调度自动刷新（延迟1秒后执行，避免频繁刷新）"""
+            # 取消之前的刷新定时器
+            if hasattr(self, '_refresh_timer'):
+                self._refresh_timer.stop()
+            
+            # 创建新的定时器，1秒后执行刷新
+            from PyQt5.QtCore import QTimer
+            self._refresh_timer = QTimer()
+            self._refresh_timer.timeout.connect(self._do_refresh)
+            self._refresh_timer.setSingleShot(True)
+            self._refresh_timer.start(1000)
+
+        def _do_refresh(self):
+            """执行静默自动刷新"""
+            # 只更新存在状态和大小，不重建列表
+            self._update_item_existence()
+            self.status_bar.showMessage("已自动刷新", 3000)
+
+        def _update_item_existence(self):
+            """更新所有项的存在状态和大小"""
+            # 更新缓存项
+            for item in self.cache_items:
+                old_exists = item['exists']
+                item['exists'] = os.path.exists(item['path'])
+                item['size'] = scan_dir_size(item['path']) if item['exists'] else 0
+                if old_exists != item['exists']:
+                    item['checked'] = item['exists']
+            
+            # 更新对话项
+            for item in self.chat_items:
+                old_exists = item.get('exists', True)
+                item['exists'] = os.path.exists(item.get('file_path', '')) or os.path.exists(item.get('path', ''))
+                if old_exists != item['exists']:
+                    item['checked'] = item['exists']
+            
+            # 更新工作区项
+            for item in self.workspace_items:
+                old_exists = item.get('exists', True)
+                item['exists'] = os.path.exists(item.get('path', ''))
+                if old_exists != item['exists']:
+                    item['checked'] = item['exists']
+            
+            # 更新扩展项
+            for item in self.extension_items:
+                old_exists = item.get('exists', True)
+                item['exists'] = os.path.exists(item.get('path', ''))
+                if old_exists != item['exists']:
+                    item['checked'] = item['exists']
+            
+            # 更新列表显示
+            self.update_cache_list()
+            self.update_workspace_list()
+            self.update_extension_table()
+            self.sort_chat('time')
+
         def update_cache_list(self):
             """更新缓存列表"""
             self.cache_list.clear()
@@ -1048,13 +1262,16 @@ if HAS_PYQT5:
                 layout.addWidget(safety_icon)
             
                 label = QLabel(f"{item['label']} ({format_size(item['size'])})")
-                # 悬浮提示包含详细信息
-                tooltip = f"<b>名称:</b> {item['label']}\n" \
-                        f"<b>描述:</b> {item['hint']}\n" \
-                        f"<b>路径:</b> {item['path']}\n" \
-                        f"<b>安全级别:</b> {'安全' if item['safe'] else '危险'}\n" \
-                        f"<b>状态:</b> {'存在' if item['exists'] else '不存在'}"
-                label.setToolTip(tooltip)
+                # 悬浮提示（纯文本，避免HTML解析延迟）
+                safe_label = '安全' if item['safe'] else '危险'
+                exists_label = '存在' if item['exists'] else '不存在'
+                label.setToolTip(
+                    f"名称: {item['label']}\n"
+                    f"描述: {item['hint']}\n"
+                    f"路径: {item['path']}\n"
+                    f"安全级别: {safe_label}\n"
+                    f"状态: {exists_label}"
+                )
                 layout.addWidget(label)
             
                 layout.addStretch()
@@ -1124,28 +1341,30 @@ if HAS_PYQT5:
                 file_path = item.get('file_path', '')
                 last_edit = item.get('last_edit_time', 0)
             
-                tooltip_parts = [
-                    "<b>📝 对话记录</b>（删除此项仅移除对话历史，不会删除源文件）",
-                    f"<b>关联文件:</b> {file_name}"
+                # 构建纯文本提示（避免HTML解析延迟）
+                tooltip_lines = [
+                    "对话记录（删除仅移除历史，不会删除源文件）",
+                    f"关联文件: {file_name}"
                 ]
                 if file_path:
-                    tooltip_parts.append(f"<b>文件路径:</b> {file_path}")
+                    tooltip_lines.append(f"文件路径: {file_path}")
                 if last_edit:
                     dt = datetime.fromtimestamp(last_edit / 1000)
-                    tooltip_parts.append(f"<b>最后编辑:</b> {dt.strftime('%Y-%m-%d %H:%M')}")
-                tooltip_parts.append(f"<b>大小:</b> {format_size(item['size'])}")
+                    tooltip_lines.append(f"最后编辑: {dt.strftime('%Y-%m-%d %H:%M')}")
+                tooltip_lines.append(f"大小: {format_size(item['size'])}")
                 if hint:
                     for line in hint.split('\n'):
                         if ':' in line:
                             k, v = line.split(':', 1)
                             k = k.strip()
                             if k not in ('文件', '大小'):
-                                tooltip_parts.append(f"<b>{k}:</b> {v}")
-                tooltip_parts.append("<hr>")
-                tooltip_parts.append("<b style='color:red'>⚠️ 删除后不可恢复！</b>")
-                label.setToolTip('<br>'.join(tooltip_parts))
-                warning_icon.setToolTip('<br>'.join(tooltip_parts))
-                checkbox.setToolTip('<br>'.join(tooltip_parts))
+                                tooltip_lines.append(f"{k}: {v}")
+                tooltip_lines.append("---")
+                tooltip_lines.append("删除后不可恢复！")
+                tooltip_text = '\n'.join(tooltip_lines)
+                label.setToolTip(tooltip_text)
+                warning_icon.setToolTip(tooltip_text)
+                checkbox.setToolTip(tooltip_text)
             
                 list_item.setSizeHint(widget.sizeHint())
                 self.chat_list.addItem(list_item)
@@ -1183,15 +1402,15 @@ if HAS_PYQT5:
             
                 label = QLabel(f"{item['label']} ({format_size(item['size'])})")
                 hint = item.get('hint', '')
-                tooltip_parts = [f"<b>项目:</b> {item['label']}",
-                            f"<b>大小:</b> {format_size(item['size'])}"]
+                tooltip_lines = [f"项目: {item['label']}",
+                            f"大小: {format_size(item['size'])}"]
                 if hint:
                     for line in hint.split('\n'):
                         if ':' in line:
                             k, v = line.split(':', 1)
-                            tooltip_parts.append(f"<b>{k}:</b> {v}")
-                tooltip_parts.append(f"<b>警告:</b> 删除可能影响项目设置！")
-                label.setToolTip('<br>'.join(tooltip_parts))
+                            tooltip_lines.append(f"{k}: {v}")
+                tooltip_lines.append("警告: 删除可能影响项目设置！")
+                label.setToolTip('\n'.join(tooltip_lines))
                 layout.addWidget(label)
             
                 layout.addStretch()
@@ -1402,14 +1621,15 @@ if HAS_PYQT5:
         
             for item in SETTINGS_ITEMS:
                 full_path = os.path.join(trae_user, item['path'])
-                size = scan_dir_size(full_path) if os.path.exists(full_path) else 0
+                exists = os.path.exists(full_path)
+                size = scan_dir_size(full_path) if exists else 0
                 self.settings_items.append({
                     'name': item['name'],
                     'path': item['path'],
                     'full_path': full_path,
                     'is_dir': item['is_dir'],
                     'size': size,
-                    'exists': os.path.exists(full_path),
+                    'exists': exists,
                     'checked': True
                 })
         
@@ -1423,6 +1643,8 @@ if HAS_PYQT5:
                 list_item = QListWidgetItem()
                 widget = QWidget()
                 layout = QHBoxLayout(widget)
+                layout.setContentsMargins(4, 2, 4, 2)
+                layout.setSpacing(6)
             
                 checkbox = QCheckBox()
                 checkbox.setChecked(item['checked'])
@@ -1430,7 +1652,26 @@ if HAS_PYQT5:
                 layout.addWidget(checkbox)
             
                 label = QLabel(f"{item['name']} ({format_size(item['size'])})")
+                full_path = item.get('full_path', '')
+                label.setToolTip(
+                    f"名称: {item['name']}\n"
+                    f"路径: {full_path}\n"
+                    f"大小: {format_size(item['size'])}\n"
+                    f"类型: {'目录' if item['is_dir'] else '文件'}"
+                )
                 layout.addWidget(label)
+            
+                # 显示路径（简化为最后两级）
+                path_parts = full_path.replace('\\', '/').split('/')
+                short_path = full_path
+                if len(path_parts) > 3:
+                    short_path = '.../' + '/'.join(path_parts[-3:])
+                path_label = QLabel(short_path)
+                path_label.setStyleSheet("color: #888; font-size: 20px;")
+                path_label.setToolTip(
+                    f"双击打开此文件夹\n{full_path}"
+                )
+                layout.addWidget(path_label)
             
                 layout.addStretch()
                 list_item.setSizeHint(widget.sizeHint())
@@ -1440,8 +1681,22 @@ if HAS_PYQT5:
         def update_item_checked(self, item, state):
             """更新项目选中状态"""
             item['checked'] = (state == Qt.Checked)
-            # 更新选中统计
-            self.update_cache_list()
+            # 更新选中统计（仅更新标签，不重建整个列表）
+            self._update_selection_stats()
+
+        def _update_selection_stats(self):
+            """更新所有列表的选中统计（轻量级，不重建界面）"""
+            # 缓存选中统计
+            for items, total_label_attr, selected_label_attr, count_label_attr in [
+                (self.cache_items, 'total_size_label', 'selected_size_label', 'selected_count_label'),
+            ]:
+                selected = [it for it in items if it.get('checked', False) and it.get('exists', True)]
+                selected_size = sum(it['size'] for it in selected)
+                getattr(self, total_label_attr).setText(f"总大小: {format_size(sum(it['size'] for it in items if it.get('exists', True)))}")
+                if hasattr(self, selected_label_attr):
+                    getattr(self, selected_label_attr).setText(f"已选择: {format_size(selected_size)}")
+                if hasattr(self, count_label_attr):
+                    getattr(self, count_label_attr).setText(f"({len(selected)} 项)")
     
         def update_mcp_enabled(self, idx, state):
             """更新MCP启用状态"""
@@ -1692,6 +1947,29 @@ if HAS_PYQT5:
         def open_mcp_dir(self):
             """打开MCP配置目录"""
             os.startfile(os.path.dirname(PathConfig.get_mcp_path()))
+            self.schedule_refresh()
+
+        def on_mcp_table_double_clicked(self, index):
+            """双击MCP表格打开路径所在目录"""
+            row = index.row()
+            col = index.column()
+            if row < len(self.mcp_entries) and col == 3:
+                entry = self.mcp_entries[row]
+                path = entry.get('cwd', '') or entry.get('command', '')
+                if path:
+                    dir_path = os.path.dirname(path) if os.path.isfile(path) else path
+                    if os.path.exists(dir_path):
+                        os.startfile(dir_path)
+                        self.schedule_refresh()
+
+        def on_cache_double_clicked(self, index):
+            """双击缓存项打开对应文件夹"""
+            row = index.row()
+            if row < len(self.cache_items):
+                path = self.cache_items[row].get('path', '')
+                if path and os.path.exists(path):
+                    os.startfile(path)
+                    self.schedule_refresh()
 
         def on_extension_double_clicked(self, index):
             """双击扩展表格打开安装目录"""
@@ -1700,6 +1978,7 @@ if HAS_PYQT5:
                 path = self.extension_items[row].get('path', '')
                 if path and os.path.exists(path):
                     os.startfile(path)
+                    self.schedule_refresh()
 
         def on_chat_double_clicked(self, index):
             """双击对话记录打开关联文件所在目录"""
@@ -1711,6 +1990,7 @@ if HAS_PYQT5:
                     dir_path = os.path.dirname(path) if os.path.isfile(path) else path
                     if dir_path and os.path.exists(dir_path):
                         os.startfile(dir_path)
+                        self.schedule_refresh()
 
         def on_workspace_double_clicked(self, index):
             """双击工作区项目打开对应目录"""
@@ -1719,6 +1999,90 @@ if HAS_PYQT5:
                 path = self.workspace_items[row].get('path', '')
                 if path and os.path.exists(path):
                     os.startfile(path)
+                    self.schedule_refresh()
+
+        def on_settings_double_clicked(self, item):
+            """双击设置项打开对应文件夹"""
+            row = self.settings_list.row(item)
+            if row >= 0 and row < len(self.settings_items):
+                full_path = self.settings_items[row].get('full_path', '')
+                if full_path and os.path.exists(full_path):
+                    if os.path.isfile(full_path):
+                        os.startfile(os.path.dirname(full_path))
+                    else:
+                        os.startfile(full_path)
+                    self.schedule_refresh()
+
+        def analyze_global_storage(self):
+            """分析全局存储目录，找出占用空间大的文件"""
+            
+            try:
+                trae_user_path = PathConfig.get_trae_user()
+                global_storage_path = os.path.join(trae_user_path, 'globalStorage')
+                
+                if not os.path.exists(global_storage_path):
+                    self.msg_warning("路径不存在", f"全局存储目录不存在:\n{global_storage_path}")
+                    return
+                
+                # 分析目录
+                self.status_bar.showMessage("正在分析全局存储目录...")
+                results = analyze_directory(global_storage_path, max_depth=3, min_size_bytes=1024*1024)
+                
+                if not results:
+                    self.msg_info("分析完成", "未找到大于1MB的文件或目录")
+                    self.status_bar.showMessage("就绪")
+                    return
+                
+                # 创建分析结果对话框（保存为实例变量防止被垃圾回收）
+                self.analyze_dialog = QDialog()
+                self.analyze_dialog.setWindowTitle("全局存储分析")
+                self.analyze_dialog.setGeometry(200, 200, 800, 600)
+                self.analyze_dialog.setModal(False)  # 非模态对话框
+                
+                layout = QVBoxLayout(self.analyze_dialog)
+                
+                # 统计信息
+                total_size = sum(item['size'] for item in results)
+                stats_label = QLabel(f"找到 {len(results)} 个大文件/目录，总计 {format_size(total_size)}")
+                stats_label.setStyleSheet("font-weight: bold; margin-bottom: 8px;")
+                layout.addWidget(stats_label)
+                
+                # 结果列表
+                result_list = QListWidget()
+                result_list.doubleClicked.connect(lambda index: self.on_analyze_double_clicked(index, results))
+                result_list.setMinimumHeight(400)
+                layout.addWidget(result_list)
+                
+                # 填充列表
+                for item in results:
+                    icon = "📁" if item['type'] == 'directory' else "📄"
+                    indent = "  " * (item['depth'] - 1)
+                    list_item = QListWidgetItem(f"{indent}{icon} {item['name']} - {format_size(item['size'])}")
+                    result_list.addItem(list_item)
+                
+                # 提示标签
+                hint_label = QLabel("💡 双击打开文件或目录")
+                hint_label.setStyleSheet("color: #666; font-size: 12px;")
+                layout.addWidget(hint_label)
+                
+                self.analyze_dialog.show()
+                self.status_bar.showMessage("就绪")
+            except Exception as e:
+                self.msg_warning("分析失败", f"分析全局存储时发生错误:\n{e}")
+                self.status_bar.showMessage("就绪")
+
+        def on_analyze_double_clicked(self, index, results):
+            """双击分析结果打开文件或目录"""
+            row = index.row()
+            if row < len(results):
+                path = results[row]['path']
+                if os.path.exists(path):
+                    if os.path.isfile(path):
+                        # 打开文件所在目录
+                        os.startfile(os.path.dirname(path))
+                    else:
+                        os.startfile(path)
+                    self.schedule_refresh()
 
         def export_settings(self):
             """导出设置"""
@@ -2092,20 +2456,83 @@ def run_cli():
         
         print()
 
+def _apply_taskbar_icon(hwnd, icon_path):
+    """使用 Windows API 强制设置任务栏图标"""
+    try:
+        # 从文件加载图标
+        ICON_BIG = 1      # ICON_BIG (for taskbar)
+        ICON_SMALL = 0    # ICON_SMALL (for title bar)
+        LR_LOADFROMFILE = 0x00000010
+        
+        hicon = ctypes.windll.user32.LoadImageW(
+            None, icon_path, 1, 0, 0, LR_LOADFROMFILE
+        )
+        if hicon:
+            # WM_SETICON = 0x0080
+            ctypes.windll.user32.SendMessageW(hwnd, 0x0080, ICON_BIG, hicon)
+            ctypes.windll.user32.SendMessageW(hwnd, 0x0080, ICON_SMALL, hicon)
+            return True
+    except:
+        pass
+    return False
+
+def minimize_console():
+    """最小化控制台窗口"""
+    try:
+        kernel32 = ctypes.WinDLL('kernel32.dll', use_last_error=True)
+        user32 = ctypes.WinDLL('user32.dll', use_last_error=True)
+        
+        console = kernel32.GetConsoleWindow()
+        if console:
+            SW_MINIMIZE = 6
+            result = user32.ShowWindow(console, SW_MINIMIZE)
+            print(f"[DEBUG] 控制台窗口最小化: handle={console}, result={result}")
+        else:
+            print(f"[DEBUG] 控制台窗口句柄为空，可能不是控制台模式启动")
+    except Exception as e:
+        print(f"[DEBUG] 控制台最小化失败: {e}")
+
 def run_gui():
     """运行GUI版本"""
+    # 必须在 QApplication 创建前设置 AppUserModelID
+    try:
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('TraeCacheCleaner.App.v1')
+    except:
+        pass
+    
     app = QApplication(sys.argv)
     
-    # 设置应用图标（同时影响任务栏）
-    app_dir = PathConfig.get_app_dir()
-    icon_path = os.path.join(app_dir, 'TraeCacheCleaner.ico')
-    if os.path.exists(icon_path):
-        app.setWindowIcon(QIcon(icon_path))
+    # 查找图标文件（打包后图标在 sys._MEIPASS 临时目录中）
+    if getattr(sys, 'frozen', False):
+        meipass = getattr(sys, '_MEIPASS', '')
+        icon_path = os.path.join(meipass, 'TraeCacheCleaner.ico') if meipass else ''
+    else:
+        icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'TraeCacheCleaner.ico')
+    if not os.path.exists(icon_path):
+        icon_path = os.path.join(os.getcwd(), 'TraeCacheCleaner.ico')
     
-    # 控制台窗口已在程序启动时处理（见文件开头）
+    # 设置 Qt 应用图标
+    icon = None
+    if os.path.exists(icon_path):
+        icon = QIcon(icon_path)
+        app.setWindowIcon(icon)
     
     window = MainWindow()
+    
+    # 设置窗口 Qt 图标（窗口创建后设置，确保覆盖）
+    if icon:
+        window.setWindowIcon(icon)
+    
     window.show()
+    
+    # 窗口显示后用 Windows API 强制设置任务栏图标
+    if os.path.exists(icon_path):
+        win_id = int(window.winId())
+        _apply_taskbar_icon(win_id, icon_path)
+    
+    # 窗口显示后再最小化控制台窗口，避免用户看不到GUI
+    minimize_console()
+    
     sys.exit(app.exec_())
 
 def _find_python_with_pyqt5():
